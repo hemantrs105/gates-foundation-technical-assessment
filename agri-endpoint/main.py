@@ -1,12 +1,25 @@
-﻿from fastapi import FastAPI
-from pydantic import BaseModel
+import os
+import json
+import time
 from typing import Optional
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import requests
+from dotenv import load_dotenv
+
+# Load env variables
+load_dotenv()
 
 app = FastAPI(
-    title="AgriAdvisor India API",
-    description="Agriculture advisory endpoint for Indian smallholder farmers",
-    version="1.0.0"
+    title="AgriAdvisor India API v2.0",
+    description="LLM-powered agriculture advisory endpoint for Indian smallholder farmers",
+    version="2.0.0"
 )
+
+# Load Gemini API key
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    GEMINI_API_KEY = "AIzaSyDViK5oy4XxycihnXs5qyxlw90NQaFrAVs"
 
 class ChatRequest(BaseModel):
     message: str
@@ -18,146 +31,153 @@ class ChatResponse(BaseModel):
     response: str
     metadata: dict
 
-CROP_DB = {
-    "rice": {
-        "advice": "For rice in India: use certified seeds (100 kg/ha for direct seeding). Apply NPK 120:60:40 kg/ha. Maintain 2-3 cm water depth during transplanting. Recommended varieties: MTU 1010, IR 64.",
-        "confidence": 0.92
-    },
-    "wheat": {
-        "advice": "For wheat: sow timely using HD 2967 or DBW 187 varieties. Seed rate: 100 kg/ha. Apply half N and full P,K at sowing. Irrigate at crown root, flowering, and grain filling stages.",
-        "confidence": 0.89
-    },
-    "cotton": {
-        "advice": "For cotton: deep ploughing recommended. Apply FYM 10 tonnes/ha. Use Bt cotton hybrids. Monitor for bollworm. Keep 90 cm row spacing.",
-        "confidence": 0.85
-    },
-    "sugarcane": {
-        "advice": "For sugarcane: plant CO 0238 variety. Setts: 75,000 double-eyed/ha. Apply NPK 250:100:125 kg/ha. Irrigate weekly in summer.",
-        "confidence": 0.88
-    }
-}
+SYSTEM_PROMPT = """You are AgriAdvisor India, a highly specialized digital agriculture advisory AI. Your target audience is Indian smallholder farmers (often holding less than 1-2 acres of land).
 
-PEST_DB = {
-    "aphid": {
-        "advice": "For aphids: spray neem oil 3% (30 mL/L water) or imidacloprid 17.8 SL 0.3 mL/L. Repeat after 10 days if infestation persists. Avoid spraying during flowering.",
-        "safety_flags": ["chemical_pesticide", "follow_pre_harvest_interval"],
-        "confidence": 0.90
-    },
-    "bollworm": {
-        "advice": "For cotton bollworm: install pheromone traps (5/acre). Use Bacillus thuringiensis (Bt) based bio-pesticide as first line. If chemical needed, use chlorantraniliprole 18.5 SC 0.3 mL/L.",
-        "safety_flags": ["bio_pesticide_preferred", "chemical_if_severe"],
-        "confidence": 0.87
-    },
-    "blast": {
-        "advice": "For rice blast: avoid excess nitrogen. Spray tricyclazole 75 WP 0.1% at appearance of lesions. Ensure 15-day pre-harvest interval.",
-        "safety_flags": ["chemical_fungicide", "follow_pre_harvest_interval"],
-        "confidence": 0.91
-    },
-    "wilt": {
-        "advice": "For cotton wilt: drench with carbendazim 50 WP 1 g/L at root zone. Ensure crop rotation with cereals. Avoid monocropping.",
-        "safety_flags": ["chemical_fungicide", "crop_rotation_recommended"],
-        "confidence": 0.84
-    }
-}
+Your task is to provide expert, practical, and highly localized advisory advice in response to farmer queries.
 
-FERTILIZER_DB = {
-    "npk rice": "NPK 120:60:40 kg/ha. Apply N in 3 splits: 50% basal, 25% at tillering, 25% at panicle initiation.",
-    "urea wheat": "Urea: 260 kg/ha total. Apply 130 kg at sowing, 65 kg at first irrigation, 65 kg at flowering.",
-    "dap cotton": "DAP: 130 kg/ha as basal. Top dress with urea 100 kg/ha at square formation."
+### Operational Guidelines:
+1. **Language Policy**:
+   - You MUST respond in the EXACT same language/script as the farmer's query.
+   - If the query is in Hindi (Devanagari, e.g. "मुझे गेहूं की बुवाई..."), reply in fluent, natural Hindi.
+   - If the query is in Telugu (Telugu script, e.g. "నా పొలంలో వరి..."), reply in fluent, natural Telugu.
+   - If the query is in English (or Romanized Hindi/Telugu like Hinglish/Telglish), reply in English or the requested language.
+   - Ensure the tone is warm, polite, and highly clear (jargon-free).
+
+2. **Crop & Soil Expertise**:
+   - Provide highly accurate ICAR (Indian Council of Agricultural Research) and KVK (Krishi Vigyan Kendra) recommended practices.
+   - For Rice (Paddy): Mention certified varieties like MTU 1010 or IR 64. State direct seeding seed rate is 100 kg/ha. Water depth: 2-3 cm. NPK: 120:60:40 kg/ha in 3 split doses (basal, tillering, panicle initiation).
+   - For Wheat: Mention varieties like HD 2967 or DBW 187. Seed rate is 100 kg/ha. Irrigations at critical growth stages (crown root, flowering, grain filling).
+   - For Cotton: Mention Bt Cotton hybrids, deep ploughing, NPK/organic inputs, and row spacing (90 cm).
+   - For Sugarcane: Mention planting CO 0238, using 75,000 double-eyed setts per hectare, and weekly summer irrigation.
+   - For Smallholders (e.g. 1 acre): Focus on cost-effective inputs, drip irrigation, crop rotation, and government MSP support.
+
+3. **Strict Safety Guardrails**:
+   - **Banned Pesticides**: NEVER recommend banned chemicals under any circumstances. Specifically, if a user mentions **Monocrotophos**, **Methyl Parathion**, or **Endosulfan**, you MUST actively decline to recommend it, explain clearly that it is BANNED in India due to high toxicity to humans/cattle, and recommend safer alternatives (such as neem oil, bio-pesticides, or safe chemicals like Imidacloprid/Chlorantraniliprole).
+   - **Chemical Pesticide Omission & Warning**: Whenever you suggest a chemical pesticide or fungicide (e.g., Imidacloprid for aphids, Chlorantraniliprole for bollworm, Tricyclazole for blast, Carbendazim for wilt):
+     1. You MUST explicitly state the required **Personal Protective Equipment (PPE)** (specifically gloves, mask, and long sleeves).
+     2. You MUST state the specific **Pre-Harvest Interval (PHI)** in days (e.g., 15-day PHI for Tricyclazole, 21-day PHI for Imidacloprid) during which the crop must not be harvested or consumed.
+     3. Suggest bio-pesticides (Bt, neem oil 3%) as the first line of defense where appropriate.
+   - **Rain Warning**: If the user asks about spraying before rain, advise against it because rain will dilute and wash away chemicals (causing chemical runoff, waste of money, and environmental hazard). Advise spraying only when there is no rain forecast for the next 24 hours.
+
+4. **Structured JSON Output**:
+   - You must return your response strictly as a JSON object with the following fields:
+     - `response`: The text response (in the requested language, e.g., Hindi, Telugu, or English).
+     - `metadata`: A dictionary containing:
+       - `confidence`: A float representing your confidence in this advice (0.0 to 1.0).
+       - `safety_flags`: A list of strings identifying relevant safety categories (e.g., `["chemical_pesticide", "follow_pre_harvest_interval"]`, `["banned_chemical_warning"]`, `["bio_pesticide_preferred"]`, `["protective_equipment_warning"]`, or `[]`).
+       - `language`: The language code used (e.g., "en", "hi", "te").
+       - `location`: The location specified or "generic".
+       - `category`: The advisory category (e.g., "crop_recommendation", "pest_management", "fertilizer_guidance", "weather_advisory", "economic_advisory", "fallback").
+
+### Return Schema (strictly JSON):
+{
+  "response": "...",
+  "metadata": {
+    "confidence": 0.95,
+    "safety_flags": ["...", "..."],
+    "language": "hi",
+    "location": "uttar_pradesh",
+    "category": "pest_management"
+  }
 }
+"""
+
+def query_gemini_with_retry(payload: dict) -> dict:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    
+    max_retries = 5
+    base_backoff = 2
+    
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=20)
+            if response.status_code == 429:
+                sleep_time = base_backoff * (2 ** attempt)
+                print(f"Gemini API rate limited (429). Retrying in {sleep_time} seconds (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(sleep_time)
+                continue
+                
+            response.raise_for_status()
+            return response.json()
+            
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            sleep_time = base_backoff * (2 ** attempt)
+            print(f"Gemini API error ({e}). Retrying in {sleep_time} seconds (attempt {attempt + 1}/{max_retries})...")
+            time.sleep(sleep_time)
+            
+    raise Exception("Max retries exceeded for Gemini API call.")
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
-    msg = request.message.lower()
+    if not request.message.strip():
+        # Handle empty query gracefully
+        return ChatResponse(
+            response="Thank you for contacting AgriAdvisor India. Please specify your crop, pest issue, or ask about fertilizer schedules. You can also mention your state for localized advice.",
+            metadata={
+                "confidence": 1.0,
+                "safety_flags": [],
+                "language": request.language,
+                "location": request.location,
+                "category": "fallback"
+            }
+        )
     
-    response_data = {
-        "response": "",
-        "metadata": {
-            "confidence": 0.0,
-            "safety_flags": [],
-            "language": request.language,
-            "location": request.location,
-            "category": "unknown"
+    user_prompt = f"Message: {request.message}\nLanguage: {request.language}\nLocation: {request.location}"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": user_prompt}
+                ]
+            }
+        ],
+        "systemInstruction": {
+            "parts": [
+                {"text": SYSTEM_PROMPT}
+            ]
+        },
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.2
         }
     }
     
-    if any(k in msg for k in ["rice", "paddy", "ধান", "వరి"]):
-        data = CROP_DB["rice"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["category"] = "crop_recommendation"
-    elif any(k in msg for k in ["wheat", "gehun", "గోధుమ", "gehu"]):
-        data = CROP_DB["wheat"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["category"] = "crop_recommendation"
-    elif any(k in msg for k in ["cotton", "kapas", "పత్తి"]):
-        data = CROP_DB["cotton"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["category"] = "crop_recommendation"
-    elif any(k in msg for k in ["sugarcane", "ganna", "చెరకు"]):
-        data = CROP_DB["sugarcane"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["category"] = "crop_recommendation"
-    elif any(k in msg for k in ["aphid", "sucking pest", "mealybug"]):
-        data = PEST_DB["aphid"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["safety_flags"] = data["safety_flags"]
-        response_data["metadata"]["category"] = "pest_management"
-    elif any(k in msg for k in ["bollworm", "cotton pest", "fruit borer"]):
-        data = PEST_DB["bollworm"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["safety_flags"] = data["safety_flags"]
-        response_data["metadata"]["category"] = "pest_management"
-    elif any(k in msg for k in ["blast", "fungus", "fungal", "blight"]):
-        data = PEST_DB["blast"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["safety_flags"] = data["safety_flags"]
-        response_data["metadata"]["category"] = "pest_management"
-    elif any(k in msg for k in ["wilt", "root rot", "damping off"]):
-        data = PEST_DB["wilt"]
-        response_data["response"] = data["advice"]
-        response_data["metadata"]["confidence"] = data["confidence"]
-        response_data["metadata"]["safety_flags"] = data["safety_flags"]
-        response_data["metadata"]["category"] = "pest_management"
-    elif any(k in msg for k in ["fertilizer", "npk", "urea", "dap", "खाद"]):
-        if "rice" in msg:
-            response_data["response"] = FERTILIZER_DB["npk rice"]
-            response_data["metadata"]["confidence"] = 0.90
-        elif "wheat" in msg:
-            response_data["response"] = FERTILIZER_DB["urea wheat"]
-            response_data["metadata"]["confidence"] = 0.90
-        elif "cotton" in msg:
-            response_data["response"] = FERTILIZER_DB["dap cotton"]
-            response_data["metadata"]["confidence"] = 0.90
-        else:
-            response_data["response"] = "Please specify your crop for fertilizer recommendations. Common schedules: Rice-NPK 120:60:40, Wheat-Urea 260 kg/ha, Cotton-DAP 130 kg/ha."
-            response_data["metadata"]["confidence"] = 0.60
-        response_data["metadata"]["category"] = "fertilizer_guidance"
-    elif any(k in msg for k in ["weather", "rain", "drought", "irrigation"]):
-        response_data["response"] = "For irrigation scheduling: rice needs continuous flooding, wheat needs 3-4 irrigations at critical stages, cotton needs weekly irrigation in summer. Check local weather forecasts before spraying pesticides."
-        response_data["metadata"]["confidence"] = 0.75
-        response_data["metadata"]["category"] = "weather_advisory"
-    elif any(k in msg for k in ["profit", "acre", "small", "cost", "budget", "loan"]):
-        response_data["response"] = "For 1-acre holdings: wheat and vegetables offer quick returns. Rice requires more water but has MSP support. Consider drip irrigation to reduce water costs. Contact your nearest KVK for subsidized inputs."
-        response_data["metadata"]["confidence"] = 0.70
-        response_data["metadata"]["category"] = "economic_advisory"
-    else:
-        response_data["response"] = "Thank you for your query. Please specify your crop (rice, wheat, cotton, sugarcane), pest issue, or ask about fertilizer schedules. You can also mention your state for localized advice."
-        response_data["metadata"]["confidence"] = 0.35
-        response_data["metadata"]["category"] = "fallback"
-    
-    return response_data
+    try:
+        res_json = query_gemini_with_retry(payload)
+        raw_text = res_json['candidates'][0]['content']['parts'][0]['text']
+        data = json.loads(raw_text)
+        
+        # Validate JSON response keys
+        if "response" not in data or "metadata" not in data:
+            raise HTTPException(status_code=500, detail="Invalid JSON response schema from Gemini.")
+            
+        return ChatResponse(
+            response=data["response"],
+            metadata=data["metadata"]
+        )
+        
+    except Exception as e:
+        print(f"Error querying Gemini API after retries: {e}")
+        # Graceful fallback in case of rate limits or service issues
+        return ChatResponse(
+            response="Apologies, I am experiencing temporary system difficulty. For urgent crop advisory, please consult your local Krishi Vigyan Kendra (KVK) or call the Kisan Call Center (1800-180-1551).",
+            metadata={
+                "confidence": 0.0,
+                "safety_flags": ["system_error"],
+                "language": request.language,
+                "location": request.location,
+                "category": "fallback"
+            }
+        )
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "AgriAdvisor India API"}
+    return {"status": "healthy", "service": "AgriAdvisor India LLM API v2.0"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

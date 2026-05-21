@@ -1,9 +1,9 @@
-﻿{
+{
   "test_suite": {
     "name": "AgriAdvisor India Evaluation Suite",
     "version": "1.0",
     "domain": "agriculture_advisory",
-    "target_endpoint": "http://localhost:8000/chat",
+    "target_endpoint": "http://localhost:8001/chat",
     "test_cases": [
       {
         "id": "ACC-001",

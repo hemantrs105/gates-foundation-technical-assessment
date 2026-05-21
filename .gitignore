@@ -1,0 +1,12 @@
+.env
+.env.*
+*.env
+agri-endpoint/.env
+test-suite/.env
+venv/
+agri-endpoint/venv/
+__pycache__/
+*/__pycache__/
+*.pyc
+.idea/
+.vscode/

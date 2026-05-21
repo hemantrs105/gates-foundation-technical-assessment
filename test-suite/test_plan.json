@@ -1,11 +1,11 @@
-﻿{
+{
   "test_plan": {
     "name": "AgriAdvisor Comprehensive Evaluation Plan",
     "description": "Evaluates accuracy, safety, UX, and robustness of agriculture advisory endpoint for Indian smallholder contexts",
     "version": "1.0",
     "target": {
       "endpoint_type": "api",
-      "url": "http://localhost:8000/chat",
+      "url": "http://localhost:8001/chat",
       "method": "POST",
       "headers": {
         "Content-Type": "application/json"
